@@ -20,7 +20,7 @@
 # Author: N5AD - January 2026 , July 2026 (updated for native ASL3 TTS)
 set -euo pipefail
 # CONFIG
-REPO_URL="https://github.com/n5ad/announcement-manager.git"
+REPO_URL="https://github.com/n5ad/test.git"
 TEMP_CLONE="/tmp/announcement-manager"
 TARGET_DIR="/var/www/html/announcement-manager"
 MP3_DIR="/mp3"
@@ -520,7 +520,7 @@ echo_step "14. Downloading piper_prompt_tts.sh"
 if [[ -f "/usr/local/bin/piper_prompt_tts.sh" ]]; then
     echo "/usr/local/bin/piper_prompt_tts.sh already exists →skipping (keeps your customized native version)"
 else
-    sudo wget -O /usr/local/bin/piper_prompt_tts.sh https://raw.githubusercontent.com/n5ad/announcement-manager/main/piper_prompt_tts.sh
+    sudo wget -O /usr/local/bin/piper_prompt_tts.sh https://raw.githubusercontent.com/n5ad/test/main/piper_prompt_tts.sh
     sudo chown root:root /usr/local/bin/piper_prompt_tts.sh
     sudo chmod +x /usr/local/bin/piper_prompt_tts.sh
     echo "piper_prompt_tts.sh downloaded and made executable."
