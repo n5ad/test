@@ -4,33 +4,63 @@
 
 
 function isAllmon3LoggedIn(): bool {
-  
-    $checkUrl = "https://127.0.0.1/allmon3/master/auth/check";
-
-    $cookieHeader = $_SERVER['HTTP_COOKIE'] ?? '';
-
-    $ch = curl_init($checkUrl);
-    curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_HTTPHEADER     => ["Cookie: $cookieHeader"],
-        CURLOPT_TIMEOUT        => 5,
-        CURLOPT_FOLLOWLOCATION => false,
-        CURLOPT_SSL_VERIFYPEER => false,
-        CURLOPT_SSL_VERIFYHOST => false,
-    ]);
-
-    $response  = curl_exec($ch);
-    $curlError = curl_error($ch);
-    curl_close($ch);
-
-    if ($response === false) {
-        error_log("allmon-announcement-frame.php: auth check curl error: $curlError");
-        return false; // fail closed
+    if (!function_exists('curl_init')) {
+        return false;
     }
 
-    $data = json_decode($response, true);
-    return isset($data['SUCCESS']) && $data['SUCCESS'] === 'Logged In';
+    $cookieHeader = $_SERVER['HTTP_COOKIE'] ?? '';
+    if ($cookieHeader === '') {
+        return false;
+    }
+
+    $host = $_SERVER['HTTP_HOST'] ?? '127.0.0.1';
+    $host = preg_replace('/[^A-Za-z0-9.:_-]/', '', $host);
+
+    $urls = [
+        'http://127.0.0.1/allmon3/master/auth/check',
+        'https://127.0.0.1/allmon3/master/auth/check',
+    ];
+
+    foreach ($urls as $checkUrl) {
+        $ch = curl_init($checkUrl);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HTTPHEADER => [
+                "Cookie: $cookieHeader",
+                "Host: $host",
+            ],
+            CURLOPT_TIMEOUT => 3,
+            CURLOPT_CONNECTTIMEOUT => 2,
+            CURLOPT_FOLLOWLOCATION => false,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => false,
+        ]);
+        $response = curl_exec($ch);
+        $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($response === false || $code >= 500) {
+            continue;
+        }
+
+        $data = json_decode($response, true);
+        if (!is_array($data)) {
+            continue;
+        }
+        if (($data['SUCCESS'] ?? '') === 'Logged In') {
+            return true;
+        }
+        if (($data['SECURITY'] ?? '') === 'Logged In') {
+            return true;
+        }
+        if (!empty($data['logged_in'])) {
+            return true;
+        }
+    }
+
+    return false;
 }
+
 
 // ====================== AUTH CHECK ======================
 if (!isAllmon3LoggedIn()) {
