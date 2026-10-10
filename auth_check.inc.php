@@ -22,23 +22,33 @@ function announcement_mgr_supermon_logged_in(): bool {
     return false;
 }
 
+
 function announcement_mgr_allmon3_logged_in(): bool {
     if (!function_exists('curl_init')) {
         return false;
     }
+
     $cookieHeader = $_SERVER['HTTP_COOKIE'] ?? '';
     if ($cookieHeader === '') {
         return false;
     }
+
+    $host = $_SERVER['HTTP_HOST'] ?? '127.0.0.1';
+    $host = preg_replace('/[^A-Za-z0-9.:_-]/', '', $host);
+
     $urls = [
-        'https://127.0.0.1/allmon3/master/auth/check',
         'http://127.0.0.1/allmon3/master/auth/check',
+        'https://127.0.0.1/allmon3/master/auth/check',
     ];
+
     foreach ($urls as $checkUrl) {
         $ch = curl_init($checkUrl);
         curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_HTTPHEADER => ["Cookie: $cookieHeader"],
+            CURLOPT_HTTPHEADER => [
+                "Cookie: $cookieHeader",
+                "Host: $host",
+            ],
             CURLOPT_TIMEOUT => 3,
             CURLOPT_CONNECTTIMEOUT => 2,
             CURLOPT_FOLLOWLOCATION => false,
@@ -48,22 +58,29 @@ function announcement_mgr_allmon3_logged_in(): bool {
         $response = curl_exec($ch);
         $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
+
         if ($response === false || $code >= 500) {
             continue;
         }
+
         $data = json_decode($response, true);
-        if (is_array($data) && isset($data['SUCCESS']) && $data['SUCCESS'] === 'Logged In') {
+        if (!is_array($data)) {
+            continue;
+        }
+        if (($data['SUCCESS'] ?? '') === 'Logged In') {
             return true;
         }
-        if (is_array($data) && isset($data['SECURITY']) && $data['SECURITY'] === 'Logged In') {
+        if (($data['SECURITY'] ?? '') === 'Logged In') {
             return true;
         }
-        if (is_array($data) && !empty($data['logged_in'])) {
+        if (!empty($data['logged_in'])) {
             return true;
         }
     }
+
     return false;
 }
+
 
 function announcement_mgr_require_auth(): void {
     if (announcement_mgr_supermon_logged_in() || announcement_mgr_allmon3_logged_in()) {
