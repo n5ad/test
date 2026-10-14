@@ -18,6 +18,7 @@
 #
 # Run as root: sudo bash announcement_manager.sh
 # Author: N5AD - January 2026 , July 2026 (updated for native ASL3 TTS)
+# Updated October 2026 for Multi Node Setups
 set -euo pipefail
 # CONFIG
 REPO_URL="https://github.com/n5ad/test.git"
@@ -85,62 +86,25 @@ NODES_FILE="$LOCAL_DIR/announcement-nodes.conf"
 printf '%s\n' "${NODE_LIST[@]}" > "$NODES_FILE"
 chmod 644 "$NODES_FILE"
 echo "Wrote allowed nodes to $NODES_FILE"
-# update allmon3.ini file for iframe insertion under every node
+# update allmon3.ini: append the iframe as the last line (no node section lookup)
 INI_FILE="/etc/allmon3/allmon3.ini"
+IFRAME_LINE="iframepost=/announcement-manager/allmon-announcement-frame.php"
 if [[ -f "$INI_FILE" ]]; then
     BACKUP_FILE="${INI_FILE}.bak.$(date +%Y%m%d-%H%M%S)"
     cp -v "$INI_FILE" "$BACKUP_FILE"
     echo "Backup created: $BACKUP_FILE"
     echo "(Restore anytime with: cp \"$BACKUP_FILE\" \"$INI_FILE\")"
     echo ""
-    for NODE_NUMBER in "${NODE_LIST[@]}"; do
-        ALREADY_CONFIGURED=$(awk -v node="$NODE_NUMBER" '
-            BEGIN { in_section=0; found=0 }
-            {
-                if ($0 ~ "^\\[") {
-                    if ($0 ~ "^\\[" node "\\]$") {
-                        in_section = 1
-                    } else {
-                        in_section = 0
-                    }
-                } else if (in_section && $0 ~ "^iframepost") {
-                    found = 1
-                }
-            }
-            END { print found }
-        ' "$INI_FILE")
-        if [ "$ALREADY_CONFIGURED" = "1" ]; then
-            echo "Iframe entries already exist for node $NODE_NUMBER → skipping"
-        else
-            echo "Adding iframe lines under [${NODE_NUMBER}] ..."
-            awk -v node="$NODE_NUMBER" '
-            {
-                if (in_section && $0 ~ "^\\[") {
-                    print "iframepost=/announcement-manager/allmon-announcement-frame.php"
-                    inserted = 1
-                    in_section = 0
-                }
-                print $0
-                if ($0 ~ "^\\[" node "\\]$") {
-                    in_section = 1
-                }
-            }
-            END {
-                if (in_section && !inserted) {
-                    print "iframepost=/announcement-manager/allmon-announcement-frame.php"
-                    inserted = 1
-                }
-                if (!inserted) {
-                    print ""
-                    print "[" node "]"
-                    print "iframepost=/announcement-manager/allmon-announcement-frame.php"
-                }
-            }
-            ' "$INI_FILE" > "$INI_FILE.tmp" && mv "$INI_FILE.tmp" "$INI_FILE"
-            echo "Successfully added iframe entries for node $NODE_NUMBER"
+    if grep -qxF "$IFRAME_LINE" "$INI_FILE"; then
+        echo "iframepost line already present in $INI_FILE → skipping"
+    else
+        # Ensure the file ends with a newline before appending
+        if [[ -s "$INI_FILE" ]] && [[ -n "$(tail -c1 "$INI_FILE")" ]]; then
+            echo "" >> "$INI_FILE"
         fi
-    done
-    NODE_NUMBER="${NODE_LIST[0]}"
+        echo "$IFRAME_LINE" >> "$INI_FILE"
+        echo "Appended iframe as the last line of $INI_FILE"
+    fi
     echo ""
     echo "=== Resulting $INI_FILE ==="
     cat "$INI_FILE"
