@@ -1,78 +1,77 @@
 <?php
 /*
- * list_cron.php
- * Reads www-data user crontab and returns node + scope.
+ * run_announcement.php
+ * Play Now. Requires a node from announcement-nodes.conf.
  */
 require_once __DIR__ . '/auth_check.inc.php';
+require_once __DIR__ . '/nodes.inc.php';
 
-header('Content-Type: application/json');
-
-$cron = shell_exec('crontab -l 2>/dev/null');
-if ($cron === null || trim($cron) === '') {
-    echo json_encode([]);
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    http_response_code(405);
+    echo "Method not allowed.";
+    exit;
+}
+if (empty($_POST['file'])) {
+    echo "No file specified.";
     exit;
 }
 
-$lines = explode("\n", $cron);
-$entries = [];
-$last_comment = "";
+$SOUNDS_DIR = '/usr/local/share/asterisk/sounds/announcements';
+$base = basename($_POST['file']);
+$base_name = pathinfo($base, PATHINFO_FILENAME);
+$scope  = strtolower(trim($_POST['scope'] ?? 'local'));
+$source = strtolower(trim($_POST['source'] ?? 'ul'));
+$node   = trim($_POST['node'] ?? '');
 
-foreach ($lines as $line) {
-    $line = trim($line);
-    if ($line === "") continue;
-
-    if (strpos($line, '# Announcement:') === 0) {
-        $last_comment = trim(str_replace('# Announcement:', '', $line));
-        continue;
+$allowed = announcement_mgr_load_nodes();
+if (!$allowed) {
+    echo "No nodes configured in /etc/asterisk/local/announcement-nodes.conf";
+    exit;
+}
+if ($node === '') {
+    $node = $allowed[0];
+}
+if ($node === 'all') {
+    if ($scope === 'global') {
+        echo "Global play must target one node.";
+        exit;
     }
-
-    if (strpos($line, 'playaudio.sh') === false &&
-        strpos($line, 'playglobal.sh') === false &&
-        strpos($line, 'polite_play.sh') === false &&
-        strpos($line, 'polite_global.sh') === false) {
-        continue;
-    }
-
-    $parts = preg_split('/\s+/', $line, -1, PREG_SPLIT_NO_EMPTY);
-    $time = implode(" ", array_slice($parts, 0, 5));
-    $command = implode(" ", array_slice($parts, 5));
-
-    $script = '';
-    $node = '';
-    $file = '';
-
-    if (preg_match('/(?:sudo\s+)?(?:\S*\/)?(playaudio\.sh|playglobal\.sh|polite_play\.sh|polite_global\.sh)\s+([0-9]+)\s+(\S+)/', $command, $matches)) {
-        $script = $matches[1];
-        $node = $matches[2];
-        $file = basename($matches[3]);
-    } elseif (preg_match('/(?:sudo\s+)?(?:\S*\/)?(playaudio\.sh|playglobal\.sh|polite_play\.sh|polite_global\.sh)\s+(\S+)/', $command, $matches)) {
-        $script = $matches[1];
-        $file = basename($matches[2]);
-    } else {
-        continue;
-    }
-
-    $file = preg_replace('/\.ul$/', '', $file);
-    $scope = (strpos($script, 'global') !== false) ? 'global' : 'local';
-    if (preg_match('/\[GLOBAL\]/i', $last_comment)) {
-        $scope = 'global';
-    } elseif (preg_match('/\[local\]/i', $last_comment)) {
-        $scope = 'local';
-    }
-    if ($node === '' && preg_match('/\[NODE\s+([0-9]+)\]/i', $last_comment, $nm)) {
-        $node = $nm[1];
-    }
-
-    $entries[] = [
-        "time"   => $time,
-        "file"   => $file,
-        "desc"   => $last_comment ?: 'No description',
-        "scope"  => $scope,
-        "node"   => $node,
-        "raw"    => $line,
-        "script" => $script
-    ];
-    $last_comment = "";
+    $targets = $allowed;
+} elseif (!announcement_mgr_node_allowed($node)) {
+    echo "Node $node is not allowed.";
+    exit;
+} else {
+    $targets = [$node];
 }
 
-echo json_encode($entries);
+if ($source === 'mp3') {
+    $play_path = '/mp3/' . $base_name;
+} else {
+    $full = $SOUNDS_DIR . '/' . $base_name;
+    $play_path = (file_exists($full . '.ul') || file_exists($full)) ? $full : 'announcements/' . $base_name;
+}
+
+if ($scope === 'global') {
+    $play_script = '/etc/asterisk/local/playglobal.sh';
+} else {
+    $play_script = '/etc/asterisk/local/playaudio.sh';
+}
+if (!is_executable($play_script)) {
+    echo "Playback script not found or not executable: $play_script";
+    exit;
+}
+
+$messages = [];
+foreach ($targets as $target) {
+    $cmd = 'sudo ' . escapeshellarg($play_script) . ' ' . escapeshellarg($target) . ' ' . escapeshellarg($play_path);
+    exec($cmd . ' 2>&1', $output, $retval);
+    if ($retval === 0) {
+        $messages[] = ($scope === 'global')
+            ? "Playing '$base_name' globally on node $target."
+            : "Playing '$base_name' locally on node $target.";
+    } else {
+        $messages[] = "Failed on node $target.\nCode: $retval\nOutput: " . implode("\n", $output);
+    }
+    $output = [];
+}
+echo implode("\n", $messages);
