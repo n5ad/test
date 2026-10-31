@@ -3,7 +3,9 @@
 #
 # - Fully automates Announcements Manager setup for Allmon3 and Supermon+
 # - Installs required packages: sox + libsox-fmt-mp3 + git + perl + apache2 + php
-# - Copies files from GitHub to /var/www/html/announcement-manager/
+# - Copies files from GitHub to /usr/local/share/announcement-manager/
+# - Creates an Apache Alias so /announcement-manager/ works on both classic and ASL3 appliance systems
+# - (Does not write into /usr/share/asl3-appliance/web — that directory is package-managed)
 # - Installs prerequisite scripts: playaudio.sh, playglobal.sh, polite_global, polite_play & audio_convert.sh in /etc/asterisk/local/ (exact from KD5FMU repos and two custom by n5ad)
 # - Creates /mp3 directory with correct permissions (2775, setgid)
 # - Automatically grants access to the invoking user
@@ -18,12 +20,16 @@
 #
 # Run as root: sudo bash announcement_manager.sh
 # Author: N5AD - January 2026 , July 2026 (updated for native ASL3 TTS)
-# Updated October 2026 for Multi Node Setups
+# Updated October 2026: Install to /usr/local/share/announcement-manager + Apache Alias
+#   (works with both classic web root and new ASL3 appliance UI per N8EI guidance)
+# Updated October 2026: Added package health check and optional DAHDI removal
+#   to survive broken dpkg state after kernel updates on Raspberry Pi (kernel 6.18+).
 set -euo pipefail
 # CONFIG
 REPO_URL="https://github.com/n5ad/test.git"
 TEMP_CLONE="/tmp/announcement-manager"
-TARGET_DIR="/var/www/html/announcement-manager"
+TARGET_DIR="/usr/local/share/announcement-manager"
+APACHE_CONF="/etc/apache2/conf-available/announcement-manager.conf"
 MP3_DIR="/mp3"
 LOCAL_DIR="/etc/asterisk/local"
 ANNOUNCE_DIR="/usr/local/share/asterisk/sounds/announcements"
@@ -36,21 +42,58 @@ warn() { echo -e "\033[1;33mWARNING:\033[0m $1" >&2; }
 error() { echo -e "\033[1;31mERROR:\033[0m $1" >&2; exit 1; }
 check_root() { [[ $EUID -eq 0 ]] || error "Run as root (sudo)."; }
 #
-# STEP 1. Install required packages FIRST force git install
+# STEP 1. Ensure apt is healthy, then install required packages
 #
 check_root
-echo_step "1. Installing required packages (sox, libsox-fmt-mp3, git, perl, apache2, php)"
-# sudo apt update && sudo apt upgrade -y || error "apt update failed. Check internet or sources.list."
-apt install -y git || error "Failed to install git. Check internet/apt sources."
-apt install -y sox libsox-fmt-mp3 perl || error "Failed to install other packages."
+echo_step "1. Checking package system health and installing required packages"
+# Fix any half-configured packages first (common after kernel updates + failed DKMS)
+if ! dpkg --audit >/dev/null 2>&1 || dpkg -l 2>/dev/null | grep -qE '^..[UR]'; then
+    warn "Detected broken or unconfigured packages. Attempting repair..."
+    apt --fix-broken install -y || true
+    dpkg --configure -a || true
+fi
+# Special handling for the known DAHDI/kernel 6.18+ failure on Raspberry Pi.
+# Modern ASL3 (3.8.3+) no longer requires DAHDI unless you have Digium hardware.
+# We only offer to remove it if it looks broken, and we always ask first.
+if dpkg -l dahdi-dkms 2>/dev/null | grep -qE '^ii|^iU|^iF'; then
+    DAHDI_BROKEN=false
+    if ! modinfo dahdi >/dev/null 2>&1; then
+        DAHDI_BROKEN=true
+    fi
+    # Also check for a recent failed build log
+    if ls /var/lib/dkms/dahdi/*/build/make.log >/dev/null 2>&1; then
+        if grep -q -E 'error:|Error|bad exit status' /var/lib/dkms/dahdi/*/build/make.log 2>/dev/null; then
+            DAHDI_BROKEN=true
+        fi
+    fi
+    if [ "$DAHDI_BROKEN" = true ]; then
+        warn "DAHDI DKMS appears to have failed to build (common on recent Raspberry Pi kernels 6.18+)."
+        warn "Modern ASL3 does not require DAHDI unless you have Digium telephony hardware cards."
+        echo -n "Remove the broken dahdi-dkms (and related) packages so the installer can continue? (Y/n) "
+        read -r remove_dahdi
+        if [[ ! "$remove_dahdi" =~ ^[Nn]$ ]]; then
+            echo "Removing broken DAHDI packages..."
+            apt remove --purge -y dahdi-dkms dahdi-linux dahdi-source dahdi 2>/dev/null || true
+            apt --fix-broken install -y || true
+            dpkg --configure -a || true
+            echo "DAHDI packages removed. Continuing."
+        else
+            warn "Leaving DAHDI in place. If apt remains broken, the installer may fail."
+        fi
+    fi
+fi
+# Now install the packages the rest of the script needs
+apt update || warn "apt update failed — continuing anyway"
+apt install -y git || error "Failed to install git. Check internet/apt sources or run: sudo apt --fix-broken install"
+apt install -y sox libsox-fmt-mp3 perl || error "Failed to install sox/perl."
 apt install -y php-curl || error "Failed to install php-curl."
 # Apache + PHP needed for the web UI when Supermon is not already providing them
 apt install -y apache2 libapache2-mod-php php php-common || error "Failed to install apache2/php."
 systemctl enable --now apache2 2>/dev/null || true
-echo "All required packages (sox, libsox-fmt-mp3, git, perl, php-curl, apache2, php) installed or already present."
 if ! command -v git >/dev/null 2>&1; then
     error "git is still not installed after apt. Check your internet or apt sources."
 fi
+echo "All required packages (sox, libsox-fmt-mp3, git, perl, php-curl, apache2, php) installed or already present."
 echo ""
 echo " Announcements Manager - Full Setup"
 echo "GitHub Repo: $REPO_URL"
@@ -122,6 +165,32 @@ git clone --depth 1 "$REPO_URL" "$TEMP_CLONE" || error "Git clone failed"
 echo_step "4. Copying files to $TARGET_DIR"
 mkdir -p "$TARGET_DIR"
 cp -v "$TEMP_CLONE"/*.{php,inc} "$TARGET_DIR"/ 2>/dev/null || warn "No .php/.inc files found"
+
+# STEP 4b. Create Apache Alias so /announcement-manager/ works everywhere
+echo_step "4b. Configuring Apache Alias for /announcement-manager/"
+cat > "$APACHE_CONF" << EOF
+##
+## Configuration for the Announcement Manager application
+##
+Alias /announcement-manager $TARGET_DIR
+
+<Directory $TARGET_DIR>
+    Options -Indexes +FollowSymLinks
+    AllowOverride None
+    Require all granted
+</Directory>
+EOF
+chmod 644 "$APACHE_CONF"
+chown root:root "$APACHE_CONF"
+
+# Enable the conf and reload Apache
+if command -v a2enconf >/dev/null 2>&1; then
+    a2enconf announcement-manager >/dev/null 2>&1 || true
+    systemctl reload apache2 2>/dev/null || systemctl reload apache2.service 2>/dev/null || true
+    echo "Apache Alias enabled: /announcement-manager → $TARGET_DIR"
+else
+    warn "a2enconf not found — you may need to enable the conf manually"
+fi
 # Keep TEMP_CLONE until after helper scripts are installed (step 8)
 # STEP 5. Create /mp3 dir + permissions
 echo_step "5. Creating /mp3 directory"
@@ -301,11 +370,11 @@ else
     BACKUP_FOOTER="${FOOTER_INC}${BACKUP_SUFFIX}"
     cp -v "$FOOTER_INC" "$BACKUP_FOOTER"
     echo "Backup of footer.inc created: $BACKUP_FOOTER"
-    if grep -q 'include_once.*/var/www/html/announcement-manager/announcement\.inc' "$FOOTER_INC"; then
+    if grep -q 'include_once.*announcement-manager/announcement\.inc' "$FOOTER_INC"; then
         echo "Announcement include already present — →skipping"
     else
         echo "Patching footer.inc..."
-        awk '
+        awk -v target="$TARGET_DIR" '
         # Look for the start of the if block
         /if \(\$_SESSION\['"'"'sm61loggedin'"'"'\] === true\) \{/ {
             print
@@ -315,7 +384,7 @@ else
         # When we find the closing ?> while inside the block, insert after it
         inblock && /^\s*\?>\s*$/ {
             print
-            print "<?php include_once \"/var/www/html/announcement-manager/announcement.inc\"; ?> <br><br>"
+            print "<?php include_once \"" target "/announcement.inc\"; ?> <br><br>"
             inblock = 0
             next
         }
